@@ -13,21 +13,24 @@ The database contains roughly 1,500,000 articles of varying topics standing at a
 
 ## How it stays tiny
 
- The LLM is a small model...Roughly 1GB on disk
+The LLM is a small model...roughly 1GB on disk.
 
+The knowledge base stays compressed. `ingest.py` reads every article
+inside every zip once, article by article, and writes a per-article
+word-frequency index straight to a SQLite database (`index.db`) on disk
+as it goes — nothing is held in memory for the whole collection at once,
+so memory use stays roughly constant whether you're indexing a thousand
+articles or a couple million. Nothing from `knowledge/` is ever left
+unzipped on disk. `index.db` itself lives only on your machine (it's in
+`.gitignore`) — it can end up several GB at full scale, bigger than the
+knowledge zips themselves, but it's disk space, not RAM, and it's fully
+rebuildable any time by re-running `ingest.py`.
 
-  The knowledge base stays compressed. `ingest.py` reads every article
-  inside every zip once, in memory, to build a lightweight per-article
-  word-frequency index, then discards the extracted text. Nothing is left
-  unzipped on disk. The index grows with the knowledge base — a few KB for
-  a small collection, tens of MB once you're indexing hundreds of
-  thousands of articles — but it's still a small fraction of the size of
-  the knowledge zips themselves, and loads fine into memory on 8GB RAM.
-
-At query time, only the top 1–2 matching articles are opened and read
-  directly out of whichever zip holds them, still in memory via Python's
-  `zipfile`, never extracted to disk  and their text becomes the model's
-  context for that one answer.
+At query time, `ask.py`/`server.py` look up the matching article(s) in
+`index.db`, then open only those 1–2 articles and read them directly out
+of whichever zip holds them, still in memory via Python's `zipfile`,
+never extracted to disk — and their text becomes the model's context for
+that one answer.
 
 
 
@@ -43,6 +46,12 @@ At query time, only the top 1–2 matching articles are opened and read
    ```
    python3 src/ingest.py
    ```
+   This builds `index.db` (SQLite) from whatever's in `knowledge/`. It writes to disk
+   incrementally as it scans, so it stays well within 8GB of RAM even over a full-size
+   knowledge base — only time and disk space grow with the collection. Re-run it any
+   time you add or change zips in `knowledge/`; it fully rebuilds `index.db` from
+   scratch each time. `index.db` is not tracked in git — it's regenerated locally,
+   not distributed.
 
 No `pip install` needed — everything in `src/` uses only Python's standard library.
 
