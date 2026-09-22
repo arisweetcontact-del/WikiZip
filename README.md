@@ -11,24 +11,6 @@ the "knowledge" stays compressed on disk until it's actually needed.
 
 The database contains 1,500,000 articles of varying topics standing at about 4GB and is compiled through data dump API's via the wiki. 
 
-The LLM is a small model...roughly 1GB on disk.
-
-The knowledge base stays compressed. `ingest.py` reads every article
-inside every zip once, article by article, and writes a per-article
-word-frequency index straight to a SQLite database (`index.db`) on disk
-as it goes — nothing is held in memory for the whole collection at once,
-so memory use stays roughly constant whether you're indexing a thousand
-articles or a couple million. Nothing from `knowledge/` is ever left
-unzipped on disk. `index.db` itself lives only on your machine (it's in
-`.gitignore`) — it can end up several GB at full scale, bigger than the
-knowledge zips themselves, but it's disk space, not RAM, and it's fully
-rebuildable any time by re-running `ingest.py`.
-
-At query time, `ask.py`/`server.py` look up the matching article(s) in
-`index.db`, then open only those 1–2 articles and read them directly out
-of whichever zip holds them, still in memory via Python's `zipfile`,
-never extracted to disk — and their text becomes the model's context for
-that one answer.
 
 
 
