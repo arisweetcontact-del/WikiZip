@@ -13,8 +13,8 @@ until it's actually needed.
 
 ## How it stays tiny
 
- **The model** is a small quantized instruct model ~350MB–1GB on disk,
-  similar in RAM while running.
+ **The model** is a small quantized instruct model ~350MB–1GB on disk
+  
   
   **The knowledge base** stays compressed. `ingest.py` reads each zip
   once, in memory, to build a lightweight word-frequency index (a JSON
