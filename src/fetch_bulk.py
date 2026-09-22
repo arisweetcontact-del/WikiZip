@@ -242,27 +242,36 @@ def write_shards(items, shard_size, shard_prefix="bulk"):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--target", type=int, default=250000, help="number of articles to collect")
+    ap.add_argument("--target", type=int, default=None,
+                     help="stop after this many articles. Omit to run with no article-count "
+                          "limit — collection then stops only at --max-gb, when the dump runs "
+                          "out, or when you Ctrl+C.")
     ap.add_argument("--shard-size", type=int, default=1000, help="articles per zip")
     ap.add_argument("--max-gb", type=float, default=7.5,
                      help="stop once the estimated compressed output would exceed this many GB "
                           "(safety cap independent of --target; default 7.5)")
     args = ap.parse_args()
 
+    target = args.target if args.target is not None else float("inf")
+
     max_raw_bytes = None
     if args.max_gb:
         max_raw_bytes = int((args.max_gb * 1024 * 1024 * 1024) / ASSUMED_COMPRESSION_RATIO)
 
-    print(f"Collecting up to {args.target:,} articles from Wikipedia's bulk export dump "
-          f"(capped at ~{args.max_gb:.1f} GB of compressed output)...")
+    if args.target is not None:
+        print(f"Collecting up to {args.target:,} articles from Wikipedia's bulk export dump "
+              f"(capped at ~{args.max_gb:.1f} GB of compressed output)...")
+    else:
+        print(f"Collecting articles from Wikipedia's bulk export dump with no article-count "
+              f"limit (capped at ~{args.max_gb:.1f} GB of compressed output)...")
     print("(this streams and discards as it goes — no multi-GB file is kept on disk)")
     print(f"(progress is saved to knowledge/ every {CHECKPOINT_EVERY:,} articles collected, "
-          f"so a dropped connection loses nothing)")
+          f"so a dropped connection — or you hitting Ctrl+C — loses nothing)")
 
     def checkpoint(collected_so_far):
         write_shards(collected_so_far, args.shard_size)
 
-    collected = collect_articles(args.target, max_raw_bytes=max_raw_bytes, checkpoint_cb=checkpoint)
+    collected = collect_articles(target, max_raw_bytes=max_raw_bytes, checkpoint_cb=checkpoint)
     print(f"\nGot {len(collected):,} articles.\n")
 
     print("Writing final zip shards into knowledge/...")
@@ -283,9 +292,12 @@ def main():
               "than estimated. Consider removing the last bulk-*.zip shard if you need to be "
               "strictly under the limit.")
 
-    if len(collected) < args.target and (not max_raw_bytes or total_bytes < max_raw_bytes):
+    if args.target is not None and len(collected) < args.target and (not max_raw_bytes or total_bytes < max_raw_bytes):
         print(f"(Got {len(collected):,} of the {args.target:,} requested — the configured "
               f"part files ran out. Add more filenames to PART_FILES for a larger run.)")
+    elif args.target is None and (not max_raw_bytes or total_bytes < max_raw_bytes):
+        print("(The configured part files ran out before hitting the size cap. Add more "
+              "filenames to PART_FILES for a longer run.)")
     print("Done (or safely stopped). Run `python3 src/ingest.py` next to index the zips.")
 
 
