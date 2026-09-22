@@ -49,10 +49,10 @@ KNOWLEDGE_DIR = os.path.join(BASE, "knowledge")
 HEADERS = {"User-Agent": "tiny-rag/1.0 (personal offline knowledge base project)"}
 DUMP_BASE = "https://dumps.wikimedia.org/enwiki/latest/"
 
-# Lower page-ID range multistream part files, in order. Each covers a
-# contiguous block of page IDs. More than enough real articles live in
-# just the first few of these to reach typical targets.
-PART_FILES = [
+# Fallback list, only used if the live directory listing can't be fetched
+# (e.g. no network at the moment this runs). Covers roughly the first ~2
+# million page IDs.
+FALLBACK_PART_FILES = [
     "enwiki-latest-pages-articles-multistream1.xml-p1p41242.bz2",
     "enwiki-latest-pages-articles-multistream2.xml-p41243p151573.bz2",
     "enwiki-latest-pages-articles-multistream3.xml-p151574p311329.bz2",
@@ -61,6 +61,40 @@ PART_FILES = [
     "enwiki-latest-pages-articles-multistream6.xml-p958046p1483661.bz2",
     "enwiki-latest-pages-articles-multistream7.xml-p1483662p2134111.bz2",
 ]
+
+_PART_FILE_RE = re.compile(
+    r'href="(enwiki-latest-pages-articles-multistream\d+\.xml-p\d+p\d+\.bz2)"'
+)
+
+
+def discover_part_files():
+    """Fetch the real directory listing and pull out every multistream part
+    file that currently exists there — instead of relying on a hardcoded
+    list that goes stale (or just runs out) as the dump grows. Falls back
+    to FALLBACK_PART_FILES if the listing can't be fetched for any reason."""
+    try:
+        req = urllib.request.Request(DUMP_BASE, headers=HEADERS)
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            html = resp.read().decode("utf-8", errors="ignore")
+    except Exception as e:
+        print(f"  ! could not fetch the dump directory listing ({e}) — "
+              f"using the built-in fallback list of part files.")
+        return FALLBACK_PART_FILES
+
+    names = sorted(set(_PART_FILE_RE.findall(html)), key=_part_file_sort_key)
+    if not names:
+        print("  ! directory listing fetched but no multistream part files found in it — "
+              "using the built-in fallback list of part files.")
+        return FALLBACK_PART_FILES
+    print(f"  found {len(names)} multistream part file(s) in the live dump listing.")
+    return names
+
+
+def _part_file_sort_key(fname):
+    m = re.search(r"multistream(\d+)\.xml-p(\d+)p(\d+)\.bz2$", fname)
+    if not m:
+        return (999999, 0, 0)
+    return (int(m.group(1)), int(m.group(2)), int(m.group(3)))
 
 # Not a target length — a safety ceiling. Virtually all articles land far
 # below this; it only guards against a handful of unusually massive pages
@@ -132,10 +166,10 @@ def open_bz2_stream(url):
     return bz2.BZ2File(resp)
 
 
-def iter_articles():
+def iter_articles(part_files):
     """Stream (title, plain_text) pairs out of the multistream dump files,
     in order, skipping redirects and disambiguation-style near-empty pages."""
-    for fname in PART_FILES:
+    for fname in part_files:
         url = DUMP_BASE + fname
         print(f"  reading {fname}")
         try:
@@ -195,7 +229,7 @@ CHECKPOINT_EVERY = 50000  # articles scanned between safety saves
 ASSUMED_COMPRESSION_RATIO = 0.55
 
 
-def collect_articles(target, max_raw_bytes=None, checkpoint_cb=None):
+def collect_articles(target, part_files, max_raw_bytes=None, checkpoint_cb=None):
     """Take articles in order until `target` is reached, the source runs
     out, or `max_raw_bytes` of raw text has been collected (whichever comes
     first). Returns whatever was collected even if interrupted — nothing is
@@ -204,7 +238,7 @@ def collect_articles(target, max_raw_bytes=None, checkpoint_cb=None):
     scanned = 0
     raw_bytes = 0
     try:
-        for title, plain in iter_articles():
+        for title, plain in iter_articles(part_files):
             scanned += 1
             collected.append((title, plain))
             raw_bytes += len(plain.encode("utf-8"))
@@ -282,7 +316,10 @@ def main():
     def checkpoint(collected_so_far):
         write_shards(collected_so_far, args.shard_size)
 
-    collected = collect_articles(target, max_raw_bytes=max_raw_bytes, checkpoint_cb=checkpoint)
+    print("Looking up the current Wikipedia dump file listing...")
+    part_files = discover_part_files()
+
+    collected = collect_articles(target, part_files, max_raw_bytes=max_raw_bytes, checkpoint_cb=checkpoint)
     print(f"\nGot {len(collected):,} articles.\n")
 
     print("Writing final zip shards into knowledge/...")
@@ -304,11 +341,11 @@ def main():
               "strictly under the limit.")
 
     if args.target is not None and len(collected) < args.target and (not max_raw_bytes or total_bytes < max_raw_bytes):
-        print(f"(Got {len(collected):,} of the {args.target:,} requested — the configured "
-              f"part files ran out. Add more filenames to PART_FILES for a larger run.)")
+        print(f"(Got {len(collected):,} of the {args.target:,} requested — ran out of "
+              f"available dump part files before reaching that count.)")
     elif args.target is None and (not max_raw_bytes or total_bytes < max_raw_bytes):
-        print("(The configured part files ran out before hitting the size cap. Add more "
-              "filenames to PART_FILES for a longer run.)")
+        print("(Ran out of available dump part files before hitting the size cap — that's "
+              "the entire current English Wikipedia dump collected, not just a partial slice.)")
     print("Done (or safely stopped). Run `python3 src/ingest.py` next to index the zips.")
 
 
