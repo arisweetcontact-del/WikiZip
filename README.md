@@ -61,10 +61,9 @@ Two different scripts for two different scales:
 
 - **`src/fetch_history.py`** — pulls articles from a specific Wikipedia category tree (e.g. `Category:History`) via the live API, one request per article. Good for a few hundred to a couple thousand articles on a focused topic. Slow at large scale (one HTTP round-trip per article).
 
-- **`src/fetch_bulk.py`** — pulls a large, broadly-sampled batch (hundreds of thousands+) from Wikipedia's bulk abstracts dump in one streaming pass, instead of per-article API calls. This is the one for "as much as possible, fast." Saves a checkpoint to `knowledge/` every 50,000 articles scanned, so a dropped connection or interrupted run doesn't lose progress — whatever's been collected so far is already written out as real, usable zips.
+- **`src/fetch_bulk.py`** — streams Wikipedia's real bulk export dumps (`enwiki-latest-pages-articles-multistream*.bz2`) and pulls full article text, cleaned down from wikitext, instead of per-article API calls. This is the one for "as much as possible, fast." Articles are taken in order (not randomly sampled) until the target is hit, and each one is capped at ~3000 characters to keep total size manageable. Saves a checkpoint to `knowledge/` every 50,000 articles collected, so a dropped connection or interrupted run doesn't lose progress — whatever's been collected so far is already written out as real, usable zips.
   ```
   python3 src/fetch_bulk.py --target 250000
   ```
-  Note: these are short lead-paragraph abstracts, not full article text — dense on topic coverage, light on depth per article.
 
 Either way, re-run `python3 src/ingest.py` after adding new zips.
