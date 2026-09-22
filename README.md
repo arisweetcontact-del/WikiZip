@@ -1,4 +1,4 @@
-# tiny-rag (NOT USEABLE YET! WILL FAIL IF RUN)
+#WikiZip (NOT USEABLE YET! WILL FAIL IF RUN)
 
 A tiny local question-answering setup that runs on 8GB of RAM, no GPU.
 
