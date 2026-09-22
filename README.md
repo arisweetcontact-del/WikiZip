@@ -1,22 +1,22 @@
-#WikiZip (NOT USEABLE YET! WILL FAIL IF RUN)
+#WikiZip (NOT TOTALLY USEABLE YET) may be inaccurate due to data holes
 
-A tiny local question-answering setup that runs on 8GB of RAM, no GPU.
+A tiny local question-answering setup that runs comfortably on 8GB of RAM.
 
 **The idea:**  reference material sits zipped, article by article. A small
 keyword index tells the system which article is relevant to a
 question. nothing is unzipped permanently. When you ask something, only
-the matching article(s) get read into memory — straight out of whichever
-zip holds them — their text is handed to a small local language model as
+the matching article(s) get read into memory straight out of whichever
+zip holds them their text is handed to a small local language model as
 context, and the model answers from that. The model itself is small and
 the "knowledge" stays compressed on disk until it's actually needed.
 
 
 ## How it stays tiny
 
- **The model** is a small quantized instruct model ~350MB–1GB on disk
+ The LLM is a small model...Roughly 1GB on disk
 
 
-  **The knowledge base** stays compressed. `ingest.py` reads every article
+  The knowledge base** stays compressed. `ingest.py` reads every article
   inside every zip once, in memory, to build a lightweight per-article
   word-frequency index, then discards the extracted text. Nothing is left
   unzipped on disk. The index grows with the knowledge base — a few KB for
@@ -24,9 +24,9 @@ the "knowledge" stays compressed on disk until it's actually needed.
   thousands of articles — but it's still a small fraction of the size of
   the knowledge zips themselves, and loads fine into memory on 8GB RAM.
 
-**At query time**, only the top 1–2 matching articles are opened — read
+At query time, only the top 1–2 matching articles are opened and read
   directly out of whichever zip holds them, still in memory via Python's
-  `zipfile`, never extracted to disk — and their text becomes the model's
+  `zipfile`, never extracted to disk  and their text becomes the model's
   context for that one answer.
 
 
