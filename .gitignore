@@ -1,0 +1,4 @@
+models/*.gguf
+index.json
+__pycache__/
+*.pyc
