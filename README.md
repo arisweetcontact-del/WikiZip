@@ -9,7 +9,7 @@ zip holds them their text is handed to a small local language model as
 context, and the model answers from that. The model itself is small and
 the "knowledge" stays compressed on disk until it's actually needed.
 
-The database contains roughly 1,700,000 articles of varying topics standing at about 4GB. 
+The database contains roughly 1,700,000 articles of varying topics standing at about 4GB and is compiled through data dump API's via the wiki. 
 
 ## How it stays tiny
 
