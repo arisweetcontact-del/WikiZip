@@ -1,0 +1,153 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>WikiZip</title>
+<style>
+  :root{
+    --paper:#F6F1E4;
+    --ink:#2A2620;
+    --ink-soft:#726B5C;
+    --red:#B4392C;
+    --red-soft:#F1DCD5;
+    --line:#C9BEA0;
+    --card:#FBF8EF;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --paper:#20241D;
+      --ink:#EDE7D6;
+      --ink-soft:#9CA28E;
+      --red:#E2725F;
+      --red-soft:#3B2521;
+      --line:#3A4032;
+      --card:#262A21;
+    }
+  }
+  *{ box-sizing:border-box; }
+  body{
+    margin:0;
+    background:var(--paper);
+    color:var(--ink);
+    font-family:'IBM Plex Mono', ui-monospace, monospace;
+    padding:32px 16px;
+    display:flex;
+    justify-content:center;
+  }
+  .wrap{ width:100%; max-width:720px; }
+  h1{
+    font-family:Georgia, serif;
+    font-style:italic;
+    font-weight:600;
+    font-size:2rem;
+    margin:0 0 4px;
+  }
+  .sub{ color:var(--ink-soft); font-size:0.85rem; margin-bottom:24px; }
+
+  form{ display:flex; gap:8px; margin-bottom:24px; }
+  input[type=text]{
+    flex:1;
+    font-family:inherit;
+    font-size:1rem;
+    padding:12px 14px;
+    border:1.5px solid var(--ink);
+    border-radius:4px;
+    background:var(--card);
+    color:var(--ink);
+  }
+  button{
+    font-family:inherit;
+    font-size:0.9rem;
+    font-weight:600;
+    padding:12px 18px;
+    border:1px solid var(--ink);
+    background:var(--ink);
+    color:var(--card);
+    border-radius:4px;
+    cursor:pointer;
+  }
+  button:disabled{ opacity:0.5; cursor:default; }
+  button:hover:not(:disabled){ background:var(--red); border-color:var(--red); }
+
+  .sources{
+    font-size:0.78rem;
+    color:var(--ink-soft);
+    margin-bottom:8px;
+    min-height:1.2em;
+  }
+  .sources b{ color:var(--red); font-weight:600; }
+
+  .answer{
+    background:var(--card);
+    border:1px solid var(--line);
+    border-radius:6px;
+    padding:18px 20px;
+    font-size:1rem;
+    line-height:1.6;
+    white-space:pre-wrap;
+    min-height:60px;
+  }
+  .answer.loading{ color:var(--ink-soft); font-style:italic; }
+  .answer.error{ color:var(--red); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>WikiZip</h1>
+  <div class="sub">Ask a question — only the relevant zipped source(s) get opened.</div>
+
+  <form id="askForm">
+    <input type="text" id="question" placeholder="e.g. when does badge access get set up?" autofocus>
+    <button type="submit" id="askBtn">Ask</button>
+  </form>
+
+  <div class="sources" id="sources"></div>
+  <div class="answer" id="answer">Ask something above to get started.</div>
+</div>
+
+<script>
+const form = document.getElementById('askForm');
+const input = document.getElementById('question');
+const btn = document.getElementById('askBtn');
+const sourcesEl = document.getElementById('sources');
+const answerEl = document.getElementById('answer');
+
+form.addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const q = input.value.trim();
+  if (!q) return;
+
+  btn.disabled = true;
+  sourcesEl.textContent = '';
+  answerEl.textContent = 'Thinking…';
+  answerEl.className = 'answer loading';
+
+  try {
+    const resp = await fetch('/api/ask', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ question: q })
+    });
+    const data = await resp.json();
+
+    if (data.error) {
+      answerEl.textContent = data.error;
+      answerEl.className = 'answer error';
+    } else {
+      sourcesEl.innerHTML = data.sources && data.sources.length
+        ? 'Unzipped: <b>' + data.sources.join(', ') + '</b>'
+        : 'No matching source found.';
+      answerEl.textContent = data.answer || '(no answer)';
+      answerEl.className = 'answer';
+    }
+  } catch (err) {
+    answerEl.textContent = 'Could not reach the local server: ' + err;
+    answerEl.className = 'answer error';
+  } finally {
+    btn.disabled = false;
+  }
+});
+</script>
+</body>
+</html>
