@@ -7,55 +7,9 @@ keyword index (a few KB) tells the system which zip is relevant to a
 question. nothing is unzipped permanently. When you ask something, only
 the matching zip(s) get read into memory, their text is handed to a small
 local language model as context, and the model answers from that. The
-model itself is small (~1GB) and the "knowledge" stays compressed on disk
+model itself is small and the "knowledge" stays compressed on disk
 until it's actually needed.
 
-
-
-## Setup
-
-1. **Install the one dependency** (this pulls in `llama.cpp` compiled for
-   your machine — CPU only, no GPU needed):
-
-   ```
-   pip install -r requirements.txt
-   ```
-
-2. **Download a small model.** For 8GB RAM on CPU, a good default is
-   **Qwen2.5-1.5B-Instruct**, quantized to Q4_K_M (~1GB file, runs fast on
-   CPU, decent quality):
-
-   https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF
-
-   Download `qwen2.5-1.5b-instruct-q4_k_m.gguf` and save it as:
-
-   ```
-   models/model.gguf
-   ```
-
-   If you want something even smaller/faster (lower quality), try
-   **Qwen2.5-0.5B-Instruct-GGUF** (~350MB) instead — same filename.
-
-3. **Add your own material.** Replace or add to the two example zips in
-   `knowledge/` — each zip should contain `.txt` or `.md` files. One zip
-   per topic/source works best (e.g. `onboarding-notes.zip`,
-   `project-x-notes.zip`), since a whole zip is what gets pulled in per
-   match.
-
-4. **Build the index** (re-run this any time you change `knowledge/`):
-
-   ```
-   python src/ingest.py
-   ```
-
-5. **Ask something:**
-
-   ```
-   python src/ask.py "when does badge access get set up?"
-   ```
-
-   You'll see which zip(s) it decided were relevant and unzipped, followed
-   by the model's answer.
 
 ## How it stays tiny
 
