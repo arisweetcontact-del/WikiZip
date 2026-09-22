@@ -229,37 +229,47 @@ CHECKPOINT_EVERY = 50000  # articles scanned between safety saves
 ASSUMED_COMPRESSION_RATIO = 0.55
 
 
-def collect_articles(target, part_files, max_raw_bytes=None, checkpoint_cb=None):
+def collect_articles(target, part_files, skip=0, max_raw_bytes=None, checkpoint_cb=None):
     """Take articles in order until `target` is reached, the source runs
     out, or `max_raw_bytes` of raw text has been collected (whichever comes
-    first). Returns whatever was collected even if interrupted — nothing is
-    lost on a dropped connection or Ctrl+C."""
+    first). If `skip` is set, the first `skip` qualifying articles are
+    fast-forwarded past (read and filtered the same way, just not stored or
+    counted toward the target/size cap) — use this to continue past
+    articles a previous run already collected, since the source order is
+    deterministic. Returns whatever was collected even if interrupted —
+    nothing is lost on a dropped connection or Ctrl+C."""
     collected = []
     scanned = 0
+    skipped = 0
     raw_bytes = 0
     try:
         for title, plain in iter_articles(part_files):
+            if skipped < skip:
+                skipped += 1
+                if skipped % 20000 == 0:
+                    print(f"  skipping already-collected articles… {skipped:,}/{skip:,}", end="\r")
+                continue
             scanned += 1
             collected.append((title, plain))
             raw_bytes += len(plain.encode("utf-8"))
             if scanned % 2000 == 0:
-                print(f"  collected {len(collected):,} articles "
+                print(f"  collected {len(collected):,} new articles "
                       f"(scanned {scanned:,} candidates, "
                       f"~{raw_bytes / (1024*1024):.0f} MB raw)…", end="\r")
             if checkpoint_cb and len(collected) % CHECKPOINT_EVERY == 0:
-                print(f"\n  checkpoint at {len(collected):,} — saving progress to knowledge/...")
+                print(f"\n  checkpoint at {len(collected):,} new articles — saving progress to knowledge/...")
                 checkpoint_cb(collected)
             if len(collected) >= target:
                 break
             if max_raw_bytes and raw_bytes >= max_raw_bytes:
-                print(f"\n  reached the size cap after {len(collected):,} articles "
+                print(f"\n  reached the size cap after {len(collected):,} new articles "
                       f"(~{raw_bytes / (1024*1024*1024):.2f} GB raw) — stopping here.")
                 break
     except (urllib.error.URLError, ConnectionError, OSError, EOFError) as e:
-        print(f"\n  ! connection interrupted after collecting {len(collected):,} articles: {e}")
+        print(f"\n  ! connection interrupted after collecting {len(collected):,} new articles: {e}")
         print("  Saving what was collected so far — nothing is lost.")
     except KeyboardInterrupt:
-        print(f"\n  Stopped by user after collecting {len(collected):,} articles.")
+        print(f"\n  Stopped by user after collecting {len(collected):,} new articles.")
         print("  Saving what was collected so far.")
     print()
     return collected
@@ -269,9 +279,25 @@ def safe_filename(title):
     return "".join(c if c.isalnum() or c in " -_" else "_" for c in title).strip()[:80]
 
 
-def write_shards(items, shard_size, shard_prefix="bulk"):
+def next_shard_number(shard_prefix="bulk"):
+    """Look at what's already in knowledge/ and return the next free shard
+    number, so a resumed run appends new shards instead of overwriting
+    whatever a previous run already wrote."""
+    if not os.path.isdir(KNOWLEDGE_DIR):
+        return 1
+    existing = [f for f in os.listdir(KNOWLEDGE_DIR)
+                if f.startswith(shard_prefix + "-") and f.endswith(".zip")]
+    nums = []
+    for f in existing:
+        m = re.match(rf"{re.escape(shard_prefix)}-(\d+)\.zip$", f)
+        if m:
+            nums.append(int(m.group(1)))
+    return (max(nums) + 1) if nums else 1
+
+
+def write_shards(items, shard_size, shard_prefix="bulk", start_shard=1):
     os.makedirs(KNOWLEDGE_DIR, exist_ok=True)
-    shard_num = 0
+    shard_num = start_shard - 1
     for i in range(0, len(items), shard_size):
         shard_num += 1
         shard_items = items[i:i + shard_size]
@@ -280,8 +306,8 @@ def write_shards(items, shard_size, shard_prefix="bulk"):
             for title, text in shard_items:
                 fname = safe_filename(title) + ".txt"
                 zf.writestr(fname, text)
-        if shard_num % 25 == 0 or i + shard_size >= len(items):
-            print(f"  wrote {shard_num} shard(s) so far…", end="\r")
+        if (shard_num - start_shard + 1) % 25 == 0 or i + shard_size >= len(items):
+            print(f"  wrote shard {shard_num} ({shard_num - start_shard + 1} so far this run)…", end="\r")
     print()
 
 
@@ -295,13 +321,37 @@ def main():
     ap.add_argument("--max-gb", type=float, default=7.5,
                      help="stop once the estimated compressed output would exceed this many GB "
                           "(safety cap independent of --target; default 7.5)")
+    ap.add_argument("--skip", type=int, default=0,
+                     help="fast-forward past this many already-collected articles before "
+                          "storing anything new. Use this to continue a previous run without "
+                          "re-writing its shards — pass the article count that run reported.")
     args = ap.parse_args()
 
     target = args.target if args.target is not None else float("inf")
 
+    def knowledge_dir_bytes():
+        if not os.path.isdir(KNOWLEDGE_DIR):
+            return 0
+        return sum(
+            os.path.getsize(os.path.join(KNOWLEDGE_DIR, f))
+            for f in os.listdir(KNOWLEDGE_DIR)
+            if os.path.isfile(os.path.join(KNOWLEDGE_DIR, f))
+        )
+
     max_raw_bytes = None
     if args.max_gb:
-        max_raw_bytes = int((args.max_gb * 1024 * 1024 * 1024) / ASSUMED_COMPRESSION_RATIO)
+        total_cap_bytes = args.max_gb * 1024 * 1024 * 1024
+        existing_bytes = knowledge_dir_bytes()
+        remaining_cap_bytes = total_cap_bytes - existing_bytes
+        if existing_bytes:
+            print(f"knowledge/ already has ~{existing_bytes / (1024*1024*1024):.2f} GB on disk "
+                  f"from previous runs; {max(remaining_cap_bytes, 0) / (1024*1024*1024):.2f} GB "
+                  f"remains under the {args.max_gb:.1f} GB cap.")
+        if remaining_cap_bytes <= 0:
+            print("Already at or over the size cap — nothing new to collect. "
+                  "Raise --max-gb if you want more.")
+            return
+        max_raw_bytes = int(remaining_cap_bytes / ASSUMED_COMPRESSION_RATIO)
 
     if args.target is not None:
         print(f"Collecting up to {args.target:,} articles from Wikipedia's bulk export dump "
@@ -313,17 +363,23 @@ def main():
     print(f"(progress is saved to knowledge/ every {CHECKPOINT_EVERY:,} articles collected, "
           f"so a dropped connection — or you hitting Ctrl+C — loses nothing)")
 
+    start_shard = next_shard_number()
+    if args.skip:
+        print(f"Skipping the first {args.skip:,} already-collected articles "
+              f"(new shards will start at bulk-{start_shard:04d}.zip)...")
+
     def checkpoint(collected_so_far):
-        write_shards(collected_so_far, args.shard_size)
+        write_shards(collected_so_far, args.shard_size, start_shard=start_shard)
 
     print("Looking up the current Wikipedia dump file listing...")
     part_files = discover_part_files()
 
-    collected = collect_articles(target, part_files, max_raw_bytes=max_raw_bytes, checkpoint_cb=checkpoint)
-    print(f"\nGot {len(collected):,} articles.\n")
+    collected = collect_articles(target, part_files, skip=args.skip,
+                                  max_raw_bytes=max_raw_bytes, checkpoint_cb=checkpoint)
+    print(f"\nGot {len(collected):,} new articles.\n")
 
     print("Writing final zip shards into knowledge/...")
-    write_shards(collected, args.shard_size)
+    write_shards(collected, args.shard_size, start_shard=start_shard)
 
     total_bytes = sum(len(t.encode("utf-8")) for _, t in collected)
     print(f"\nRaw text: ~{total_bytes / (1024*1024):.1f} MB before compression.")
