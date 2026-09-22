@@ -69,22 +69,16 @@ tiny-rag/
 
 ## How it stays tiny
 
-- **The model** is a small quantized instruct model (~350MB–1GB on disk,
-  similar in RAM while running) — no GPU or large download required.
-- **The knowledge base** stays compressed. `ingest.py` reads each zip
+ **The model** is a small quantized instruct model ~350MB–1GB on disk,
+  similar in RAM while running.
+  
+  **The knowledge base** stays compressed. `ingest.py` reads each zip
   once, in memory, to build a lightweight word-frequency index (a JSON
-  file, typically a few KB even for a large knowledge base), then
+  file, typically a few KB even for a large knowledge base, then
   discards the extracted text. Nothing is left unzipped on disk.
-- **At query time**, only the top 1–2 matching zips are opened (still in
+
+**At query time**, only the top 1–2 matching zips are opened (still in
   memory, via Python's `zipfile`, never extracted to disk) and their text
   becomes the model's context for that one answer.
 
-## Notes / limits
 
-This is a prototype-grade retrieval method (word-frequency + inverse
-document frequency scoring — no embeddings, no vector database), which
-keeps it dependency-free and fast to set up. It works well when each zip
-covers a distinct topic and questions use similar wording to the source
-text. If you outgrow it, the natural upgrade is swapping `ask.py`'s
-`rank()` function for embedding-based similarity — the zip-per-topic
-storage model stays the same either way.
