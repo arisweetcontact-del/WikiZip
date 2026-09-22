@@ -1,4 +1,4 @@
-#WikiZip (NOT TOTALLY USEABLE YET)
+#WikiZip (NOT TOTALLY USEABLE YET) may be inaccurate due to data holes
 
 A tiny local question-answering setup that runs on 8GB of RAM, no GPU.
 
