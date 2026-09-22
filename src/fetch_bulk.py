@@ -170,24 +170,39 @@ def iter_articles():
 
 CHECKPOINT_EVERY = 50000  # articles scanned between safety saves
 
+# Text generally shrinks to somewhere around 40-55% of its original size
+# under zip's deflate compression. We use 0.55 (i.e. assume compression is
+# LESS favorable than typical) so the raw-byte budget below stays a safe,
+# conservative estimate of the real on-disk zip size rather than an
+# optimistic one.
+ASSUMED_COMPRESSION_RATIO = 0.55
 
-def collect_articles(target, checkpoint_cb=None):
-    """Take articles in order until `target` is reached (or the source runs
-    out). Returns whatever was collected even if interrupted — nothing is
+
+def collect_articles(target, max_raw_bytes=None, checkpoint_cb=None):
+    """Take articles in order until `target` is reached, the source runs
+    out, or `max_raw_bytes` of raw text has been collected (whichever comes
+    first). Returns whatever was collected even if interrupted — nothing is
     lost on a dropped connection or Ctrl+C."""
     collected = []
     scanned = 0
+    raw_bytes = 0
     try:
         for title, plain in iter_articles():
             scanned += 1
             collected.append((title, plain))
+            raw_bytes += len(plain.encode("utf-8"))
             if scanned % 2000 == 0:
                 print(f"  collected {len(collected):,} articles "
-                      f"(scanned {scanned:,} candidates)…", end="\r")
+                      f"(scanned {scanned:,} candidates, "
+                      f"~{raw_bytes / (1024*1024):.0f} MB raw)…", end="\r")
             if checkpoint_cb and len(collected) % CHECKPOINT_EVERY == 0:
                 print(f"\n  checkpoint at {len(collected):,} — saving progress to knowledge/...")
                 checkpoint_cb(collected)
             if len(collected) >= target:
+                break
+            if max_raw_bytes and raw_bytes >= max_raw_bytes:
+                print(f"\n  reached the size cap after {len(collected):,} articles "
+                      f"(~{raw_bytes / (1024*1024*1024):.2f} GB raw) — stopping here.")
                 break
     except (urllib.error.URLError, ConnectionError, OSError) as e:
         print(f"\n  ! connection interrupted after collecting {len(collected):,} articles: {e}")
@@ -223,9 +238,17 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--target", type=int, default=250000, help="number of articles to collect")
     ap.add_argument("--shard-size", type=int, default=1000, help="articles per zip")
+    ap.add_argument("--max-gb", type=float, default=7.5,
+                     help="stop once the estimated compressed output would exceed this many GB "
+                          "(safety cap independent of --target; default 7.5)")
     args = ap.parse_args()
 
-    print(f"Collecting {args.target:,} articles from Wikipedia's bulk export dump...")
+    max_raw_bytes = None
+    if args.max_gb:
+        max_raw_bytes = int((args.max_gb * 1024 * 1024 * 1024) / ASSUMED_COMPRESSION_RATIO)
+
+    print(f"Collecting up to {args.target:,} articles from Wikipedia's bulk export dump "
+          f"(capped at ~{args.max_gb:.1f} GB of compressed output)...")
     print("(this streams and discards as it goes — no multi-GB file is kept on disk)")
     print(f"(progress is saved to knowledge/ every {CHECKPOINT_EVERY:,} articles collected, "
           f"so a dropped connection loses nothing)")
@@ -233,7 +256,7 @@ def main():
     def checkpoint(collected_so_far):
         write_shards(collected_so_far, args.shard_size)
 
-    collected = collect_articles(args.target, checkpoint_cb=checkpoint)
+    collected = collect_articles(args.target, max_raw_bytes=max_raw_bytes, checkpoint_cb=checkpoint)
     print(f"\nGot {len(collected):,} articles.\n")
 
     print("Writing final zip shards into knowledge/...")
@@ -241,7 +264,20 @@ def main():
 
     total_bytes = sum(len(t.encode("utf-8")) for _, t in collected)
     print(f"\nRaw text: ~{total_bytes / (1024*1024):.1f} MB before compression.")
-    if len(collected) < args.target:
+
+    actual_knowledge_bytes = sum(
+        os.path.getsize(os.path.join(KNOWLEDGE_DIR, f))
+        for f in os.listdir(KNOWLEDGE_DIR)
+        if os.path.isfile(os.path.join(KNOWLEDGE_DIR, f))
+    )
+    actual_gb = actual_knowledge_bytes / (1024 * 1024 * 1024)
+    print(f"knowledge/ is now ~{actual_gb:.2f} GB on disk (cap was {args.max_gb:.1f} GB).")
+    if actual_gb > args.max_gb:
+        print("  ! this is over the cap — compression on this batch came out less favorable "
+              "than estimated. Consider removing the last bulk-*.zip shard if you need to be "
+              "strictly under the limit.")
+
+    if len(collected) < args.target and (not max_raw_bytes or total_bytes < max_raw_bytes):
         print(f"(Got {len(collected):,} of the {args.target:,} requested — the configured "
               f"part files ran out. Add more filenames to PART_FILES for a larger run.)")
     print("Done (or safely stopped). Run `python3 src/ingest.py` next to index the zips.")
