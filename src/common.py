@@ -5,7 +5,7 @@ import os
 import re
 import zipfile
 
-TOKEN_RE = re.compile(r"[a-zA-Z']+")
+TOKEN_RE = re.compile(r"[a-zA-Z0-9']+")
 
 
 def tokenize(text):

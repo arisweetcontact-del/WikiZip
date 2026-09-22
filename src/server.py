@@ -49,14 +49,14 @@ class Handler(BaseHTTPRequestHandler):
             self._send_json({"error": "Ask something first."}, status=400)
             return
 
-        if not os.path.exists(ask.INDEX_PATH):
+        index = self.server.get_index()
+        if index is None:
             self._send_json({
                 "error": "No index found — run `python3 src/ingest.py` first."
             })
             return
 
         try:
-            index = ask.load_index()
             ranked = [(s, f) for s, f in ask.rank(question, index) if s > 0][:ask.TOP_K]
             top_files = [f for _, f in ranked]
             context = ask.build_context(top_files) if top_files else ""
@@ -93,8 +93,29 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
 
+class WikiZipServer(ThreadingHTTPServer):
+    """Loads the index once at startup and caches it in memory, instead of
+    re-reading (potentially a large) index.json off disk on every request."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._index = None
+        self._index_mtime = None
+
+    def get_index(self):
+        if not os.path.exists(ask.INDEX_PATH):
+            return None
+        mtime = os.path.getmtime(ask.INDEX_PATH)
+        if self._index is None or mtime != self._index_mtime:
+            print("Loading index.json into memory...")
+            self._index = ask.load_index()
+            self._index_mtime = mtime
+            print("Index loaded.")
+        return self._index
+
+
 def main():
-    server = ThreadingHTTPServer(("localhost", PORT), Handler)
+    server = WikiZipServer(("localhost", PORT), Handler)
     print(f"WikiZip running at http://localhost:{PORT}  (Ctrl+C to stop)")
     try:
         server.serve_forever()

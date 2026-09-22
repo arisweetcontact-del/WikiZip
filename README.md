@@ -26,3 +26,45 @@ until it's actually needed.
   becomes the model's context for that one answer.
 
 
+
+## Setup
+
+1. **Install Ollama** (runs the local model — no Python packaging involved):
+   - https://ollama.com/download, or `brew install ollama`
+2. **Pull a small model:**
+   ```
+   ollama pull qwen2.5:1.5b
+   ```
+3. **Add material** to `knowledge/` as `.zip` files (each containing `.txt`/`.md` files), then build the index:
+   ```
+   python3 src/ingest.py
+   ```
+
+No `pip install` needed — everything in `src/` uses only Python's standard library.
+
+## Usage
+
+**Command line:**
+```
+python3 src/ask.py "your question"
+```
+
+**Web UI** (a small local browser interface instead of the CLI):
+```
+python3 src/server.py
+```
+Then open http://localhost:8765.
+
+## Growing the knowledge base
+
+Two different scripts for two different scales:
+
+- **`src/fetch_history.py`** — pulls articles from a specific Wikipedia category tree (e.g. `Category:History`) via the live API, one request per article. Good for a few hundred to a couple thousand articles on a focused topic. Slow at large scale (one HTTP round-trip per article).
+
+- **`src/fetch_bulk.py`** — pulls a large, broadly-sampled batch (hundreds of thousands+) from Wikipedia's bulk abstracts dump in one streaming pass, instead of per-article API calls. This is the one for "as much as possible, fast." Saves a checkpoint to `knowledge/` every 50,000 articles scanned, so a dropped connection or interrupted run doesn't lose progress — whatever's been collected so far is already written out as real, usable zips.
+  ```
+  python3 src/fetch_bulk.py --target 250000
+  ```
+  Note: these are short lead-paragraph abstracts, not full article text — dense on topic coverage, light on depth per article.
+
+Either way, re-run `python3 src/ingest.py` after adding new zips.
