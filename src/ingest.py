@@ -83,6 +83,7 @@ def build_index():
     next_term_id = 1
 
     total_articles = 0
+    duplicate_articles = 0
     since_commit = 0
     for fname in zip_files:
         path = os.path.join(KNOWLEDGE_DIR, fname)
@@ -94,10 +95,18 @@ def build_index():
             counts = Counter(tokens)
 
             key = make_doc_key(fname, member_name)
+            # INSERT OR IGNORE rather than a plain INSERT: with ~1.5M articles
+            # collected across more than one fetch_bulk.py run, the same
+            # article can legitimately show up twice (e.g. runs whose page
+            # ranges overlapped slightly). That's not corruption — just skip
+            # the repeat rather than crashing the whole build.
             cur = conn.execute(
-                "INSERT INTO docs (doc_key, length) VALUES (?, ?)",
+                "INSERT OR IGNORE INTO docs (doc_key, length) VALUES (?, ?)",
                 (key, len(tokens)),
             )
+            if cur.rowcount == 0:
+                duplicate_articles += 1
+                continue
             doc_id = cur.lastrowid
 
             posting_rows = []
@@ -139,7 +148,8 @@ def build_index():
     conn.close()
 
     size_mb = os.path.getsize(INDEX_PATH) / (1024 * 1024)
-    print(f"\nWrote index for {total_articles:,} article(s) across {len(zip_files)} zip(s), "
+    dup_note = f", skipped {duplicate_articles:,} duplicate article(s)" if duplicate_articles else ""
+    print(f"\nWrote index for {total_articles:,} article(s) across {len(zip_files)} zip(s){dup_note}, "
           f"{len(term_ids):,} unique terms -> {INDEX_PATH} ({size_mb:.1f} MB)")
 
 
