@@ -144,34 +144,45 @@ def iter_articles():
             print(f"  ! could not open {fname}: {e} — skipping")
             continue
 
-        for event, elem in ET.iterparse(stream, events=("end",)):
-            if localname(elem.tag) != "page":
-                continue
+        try:
+            for event, elem in ET.iterparse(stream, events=("end",)):
+                if localname(elem.tag) != "page":
+                    continue
 
-            title = None
-            raw_text = None
-            ns = None
-            for child in elem.iter():
-                name = localname(child.tag)
-                if name == "title" and title is None:
-                    title = child.text
-                elif name == "ns" and ns is None:
-                    ns = child.text
-                elif name == "text" and raw_text is None:
-                    raw_text = child.text
+                title = None
+                raw_text = None
+                ns = None
+                for child in elem.iter():
+                    name = localname(child.tag)
+                    if name == "title" and title is None:
+                        title = child.text
+                    elif name == "ns" and ns is None:
+                        ns = child.text
+                    elif name == "text" and raw_text is None:
+                        raw_text = child.text
 
-            elem.clear()  # free memory — critical for a multi-GB stream
+                elem.clear()  # free memory — critical for a multi-GB stream
 
-            if ns != "0" or not title or not raw_text:
-                continue  # only main-namespace articles with real content
-            if raw_text.lstrip().upper().startswith("#REDIRECT"):
-                continue
+                if ns != "0" or not title or not raw_text:
+                    continue  # only main-namespace articles with real content
+                if raw_text.lstrip().upper().startswith("#REDIRECT"):
+                    continue
 
-            plain = wikitext_to_plain(raw_text)[:MAX_EXTRACT_CHARS]
-            if len(plain) < 200:
-                continue  # too short to be useful (stub/disambiguation-ish)
+                plain = wikitext_to_plain(raw_text)[:MAX_EXTRACT_CHARS]
+                if len(plain) < 200:
+                    continue  # too short to be useful (stub/disambiguation-ish)
 
-            yield title, plain
+                yield title, plain
+        except (EOFError, OSError, urllib.error.URLError) as e:
+            # A dropped connection mid-download leaves bz2/XML mid-stream —
+            # bz2 raises EOFError specifically (not a subclass of OSError,
+            # so it needs its own catch here). Whatever was already parsed
+            # out of this file is kept; just move on to the next part file
+            # instead of losing the entire run over one bad download.
+            print(f"\n  ! {fname} ended early ({e}) — likely a dropped connection "
+                  f"partway through the download. Articles already parsed from it "
+                  f"are kept; moving on to the next part file.")
+            continue
 
 
 CHECKPOINT_EVERY = 50000  # articles scanned between safety saves
@@ -210,7 +221,7 @@ def collect_articles(target, max_raw_bytes=None, checkpoint_cb=None):
                 print(f"\n  reached the size cap after {len(collected):,} articles "
                       f"(~{raw_bytes / (1024*1024*1024):.2f} GB raw) — stopping here.")
                 break
-    except (urllib.error.URLError, ConnectionError, OSError) as e:
+    except (urllib.error.URLError, ConnectionError, OSError, EOFError) as e:
         print(f"\n  ! connection interrupted after collecting {len(collected):,} articles: {e}")
         print("  Saving what was collected so far — nothing is lost.")
     except KeyboardInterrupt:
