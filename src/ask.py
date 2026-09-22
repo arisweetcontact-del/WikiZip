@@ -1,6 +1,7 @@
-"""Ask a question. Scores every zip in knowledge/ against your question using
-the tiny index, unzips ONLY the best-matching zip(s) in memory, and hands
-that text to a small local model (served by Ollama) as context.
+"""Ask a question. Scores every ARTICLE in knowledge/ against your question
+using the tiny index, then reads ONLY the best-matching article(s) out of
+their zip in memory (not the whole zip), and hands that text to a small
+local model (served by Ollama) as context.
 
 Usage:
     python3 src/ask.py "what does the onboarding doc say about week one?"
@@ -14,7 +15,7 @@ import urllib.error
 import urllib.request
 
 sys.path.insert(0, os.path.dirname(__file__))
-from common import tokenize, read_zip_text  # noqa: E402
+from common import tokenize, read_zip_member_text, split_doc_key  # noqa: E402
 
 BASE = os.path.join(os.path.dirname(__file__), "..")
 KNOWLEDGE_DIR = os.path.join(BASE, "knowledge")
@@ -24,7 +25,11 @@ OLLAMA_URL = "http://localhost:11434/api/generate"
 OLLAMA_MODEL = "qwen2.5:1.5b"
 
 TOP_K = 2
-MAX_CONTEXT_CHARS = 6000
+# Total characters of article text handed to the model as context, split
+# across the top matches. Doubled from the original 6000 now that retrieval
+# is per-article (full articles, not just whatever came first in a zip) —
+# still comfortably within qwen2.5:1.5b's context window on 8GB RAM/CPU.
+MAX_CONTEXT_CHARS = 12000
 
 
 def load_index():
@@ -46,20 +51,25 @@ def score(query_tokens, doc_counts, doc_len, df, num_docs):
 def rank(question, index):
     q_tokens = tokenize(question)
     scores = []
-    for fname, counts in index["doc_freqs"].items():
-        s = score(q_tokens, counts, index["doc_lengths"][fname], index["df"], index["num_docs"])
-        scores.append((s, fname))
+    for doc_key, counts in index["doc_freqs"].items():
+        s = score(q_tokens, counts, index["doc_lengths"][doc_key], index["df"], index["num_docs"])
+        scores.append((s, doc_key))
     scores.sort(reverse=True)
     return scores
 
 
-def build_context(top_files):
+def build_context(top_docs):
+    """top_docs: list of doc keys, each "zipfile::member". Reads each
+    matched article's full text directly out of its zip (never the whole
+    zip), so a full-length article is actually usable as context."""
     parts = []
-    per_doc_budget = MAX_CONTEXT_CHARS // max(len(top_files), 1)
-    for fname in top_files:
-        path = os.path.join(KNOWLEDGE_DIR, fname)
-        text = read_zip_text(path, max_chars=per_doc_budget)
-        parts.append(f"[Source: {fname}]\n{text}")
+    per_doc_budget = MAX_CONTEXT_CHARS // max(len(top_docs), 1)
+    for doc_key in top_docs:
+        zip_filename, member_name = split_doc_key(doc_key)
+        zip_path = os.path.join(KNOWLEDGE_DIR, zip_filename)
+        text = read_zip_member_text(zip_path, member_name, max_chars=per_doc_budget)
+        label = os.path.splitext(os.path.basename(member_name))[0].replace("_", " ")
+        parts.append(f"[Source: {label} ({zip_filename})]\n{text}")
     return "\n\n".join(parts)
 
 
@@ -98,13 +108,13 @@ def main():
     ranked = [(s, f) for s, f in rank(question, index) if s > 0][:TOP_K]
 
     if not ranked:
-        print("No relevant zipped source matched that question.")
-        top_files = []
+        print("No relevant article matched that question.")
+        top_docs = []
     else:
-        top_files = [f for _, f in ranked]
-        print("Unzipping relevant source(s):", ", ".join(top_files))
+        top_docs = [f for _, f in ranked]
+        print("Using article(s):", ", ".join(top_docs))
 
-    context = build_context(top_files) if top_files else ""
+    context = build_context(top_docs) if top_docs else ""
 
     system = (
         "You are a helpful assistant. Answer using only the provided context. "

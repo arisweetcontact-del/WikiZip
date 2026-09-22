@@ -27,8 +27,10 @@ Notes:
       (no external dependencies). It strips templates, refs, tables, links,
       and formatting reasonably well, but won't be perfect on every article
       — some residual markup may slip through occasionally.
-    - Each article's cleaned text is capped at ~3000 characters, which
-      keeps the whole run well under a "few GB" even at very large targets.
+    - Full articles are kept (no fixed truncation) except for a generous
+      50,000-character safety ceiling that only ever kicks in for a
+      handful of unusually massive pages. Overall disk usage is bounded
+      separately by --max-gb, not by per-article length.
 """
 
 import argparse
@@ -60,7 +62,11 @@ PART_FILES = [
     "enwiki-latest-pages-articles-multistream7.xml-p1483662p2134111.bz2",
 ]
 
-MAX_EXTRACT_CHARS = 3000
+# Not a target length — a safety ceiling. Virtually all articles land far
+# below this; it only guards against a handful of unusually massive pages
+# (long list articles, major topics) eating a disproportionate share of the
+# --max-gb budget in one shot.
+MAX_EXTRACT_CHARS = 50000
 
 
 def localname(tag):
