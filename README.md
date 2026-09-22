@@ -2,7 +2,7 @@
 
 A tiny local question-answering setup that runs on 8GB of RAM, no GPU.
 
-**The idea:** your reference material sits zipped. A small
+**The idea:**  reference material sits zipped. A small
 keyword index (a few KB) tells the system which zip is relevant to a
 question. nothing is unzipped permanently. When you ask something, only
 the matching zip(s) get read into memory, their text is handed to a small
