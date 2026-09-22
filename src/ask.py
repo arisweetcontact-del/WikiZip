@@ -1,15 +1,17 @@
 """Ask a question. Scores every zip in knowledge/ against your question using
 the tiny index, unzips ONLY the best-matching zip(s) in memory, and hands
-that text to a small local GGUF model as context.
+that text to a small local model (served by Ollama) as context.
 
 Usage:
-    python src/ask.py "what does the onboarding doc say about week one?"
+    python3 src/ask.py "what does the onboarding doc say about week one?"
 """
 
+import json
 import math
 import os
 import sys
-from collections import Counter
+import urllib.error
+import urllib.request
 
 sys.path.insert(0, os.path.dirname(__file__))
 from common import tokenize, read_zip_text  # noqa: E402
@@ -17,14 +19,15 @@ from common import tokenize, read_zip_text  # noqa: E402
 BASE = os.path.join(os.path.dirname(__file__), "..")
 KNOWLEDGE_DIR = os.path.join(BASE, "knowledge")
 INDEX_PATH = os.path.join(BASE, "index.json")
-MODEL_PATH = os.path.join(BASE, "models", "model.gguf")
+
+OLLAMA_URL = "http://localhost:11434/api/generate"
+OLLAMA_MODEL = "qwen2.5:1.5b"
 
 TOP_K = 2
 MAX_CONTEXT_CHARS = 6000
 
 
 def load_index():
-    import json
     with open(INDEX_PATH) as f:
         return json.load(f)
 
@@ -60,14 +63,35 @@ def build_context(top_files):
     return "\n\n".join(parts)
 
 
+def ask_ollama(prompt):
+    payload = json.dumps({
+        "model": OLLAMA_MODEL,
+        "prompt": prompt,
+        "stream": False,
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        OLLAMA_URL, data=payload, headers={"Content-Type": "application/json"}
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            data = json.loads(resp.read())
+            return data.get("response", "").strip()
+    except urllib.error.URLError as e:
+        return (
+            f"Couldn't reach Ollama at {OLLAMA_URL} ({e}).\n"
+            f"Make sure Ollama is running and you've pulled the model:\n"
+            f"  ollama pull {OLLAMA_MODEL}"
+        )
+
+
 def main():
     if len(sys.argv) < 2:
-        print('Usage: python src/ask.py "your question"')
+        print('Usage: python3 src/ask.py "your question"')
         return
     question = " ".join(sys.argv[1:])
 
     if not os.path.exists(INDEX_PATH):
-        print("No index found — run `python src/ingest.py` first.")
+        print("No index found — run `python3 src/ingest.py` first.")
         return
 
     index = load_index()
@@ -82,25 +106,13 @@ def main():
 
     context = build_context(top_files) if top_files else ""
 
-    if not os.path.exists(MODEL_PATH):
-        print(f"\nNo model found at {MODEL_PATH}.")
-        print("Download a small GGUF model there (see README) to get generated")
-        print("answers. For now, here's the retrieved context:\n")
-        print(context[:2000] or "(nothing retrieved)")
-        return
-
-    from llama_cpp import Llama
-
-    llm = Llama(model_path=MODEL_PATH, n_ctx=4096, n_threads=os.cpu_count(), verbose=False)
-
     system = (
         "You are a helpful assistant. Answer using only the provided context. "
         "If the answer isn't in the context, say you don't know."
     )
     prompt = f"{system}\n\nContext:\n{context}\n\nQuestion: {question}\nAnswer:"
 
-    out = llm(prompt, max_tokens=400, stop=["\nQuestion:"])
-    print("\n" + out["choices"][0]["text"].strip())
+    print("\n" + ask_ollama(prompt))
 
 
 if __name__ == "__main__":

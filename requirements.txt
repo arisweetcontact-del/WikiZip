@@ -1,1 +1,2 @@
-llama-cpp-python
+# No Python packages required — src/ uses only the standard library.
+# The model itself runs via Ollama (see README.md for setup).
