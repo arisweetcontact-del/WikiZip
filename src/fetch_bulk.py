@@ -231,7 +231,7 @@ def write_shards(items, shard_size, shard_prefix="bulk"):
         shard_num += 1
         shard_items = items[i:i + shard_size]
         zip_path = os.path.join(KNOWLEDGE_DIR, f"{shard_prefix}-{shard_num:04d}.zip")
-        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_LZMA) as zf:
             for title, text in shard_items:
                 fname = safe_filename(title) + ".txt"
                 zf.writestr(fname, text)
