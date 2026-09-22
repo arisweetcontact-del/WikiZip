@@ -11,8 +11,6 @@ the "knowledge" stays compressed on disk until it's actually needed.
 
 The database contains 1,500,000 articles of varying topics standing at about 4GB and is compiled through data dump API's via the wiki. 
 
-## How it stays tiny
-
 The LLM is a small model...roughly 1GB on disk.
 
 The knowledge base stays compressed. `ingest.py` reads every article
