@@ -1,4 +1,7 @@
 models/*.gguf
 index.json
+index.db
+index.db-wal
+index.db-shm
 __pycache__/
 *.pyc

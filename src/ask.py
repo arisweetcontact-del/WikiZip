@@ -1,7 +1,7 @@
 """Ask a question. Scores every ARTICLE in knowledge/ against your question
-using the tiny index, then reads ONLY the best-matching article(s) out of
-their zip in memory (not the whole zip), and hands that text to a small
-local model (served by Ollama) as context.
+using the SQLite keyword index (built by ingest.py), then reads ONLY the
+best-matching article(s) out of their zip in memory (not the whole zip),
+and hands that text to a small local model (served by Ollama) as context.
 
 Usage:
     python3 src/ask.py "what does the onboarding doc say about week one?"
@@ -10,6 +10,7 @@ Usage:
 import json
 import math
 import os
+import sqlite3
 import sys
 import urllib.error
 import urllib.request
@@ -19,43 +20,70 @@ from common import tokenize, read_zip_member_text, split_doc_key  # noqa: E402
 
 BASE = os.path.join(os.path.dirname(__file__), "..")
 KNOWLEDGE_DIR = os.path.join(BASE, "knowledge")
-INDEX_PATH = os.path.join(BASE, "index.json")
+INDEX_PATH = os.path.join(BASE, "index.db")
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
 OLLAMA_MODEL = "qwen2.5:1.5b"
 
 TOP_K = 2
-# Total characters of article text handed to the model as context, split
-# across the top matches. Doubled from the original 6000 now that retrieval
-# is per-article (full articles, not just whatever came first in a zip) —
-# still comfortably within qwen2.5:1.5b's context window on 8GB RAM/CPU.
 MAX_CONTEXT_CHARS = 12000
 
+# Query-time safety valve: a term appearing in more than this fraction of
+# all documents is treated as a stopword and skipped, rather than pulling
+# what could be well over a million postings rows for it. Set high enough
+# (0.5) that it only catches near-universal words ("the", "of", "and"),
+# not legitimately common topical words, which still carry real tf-idf
+# signal even at moderate document frequency.
+MAX_DOC_FRACTION = 0.5
 
-def load_index():
-    with open(INDEX_PATH) as f:
-        return json.load(f)
+
+def open_index():
+    """Open the index read-only. Safe to share across threads (server.py
+    caches one connection and reuses it for every request)."""
+    if not os.path.exists(INDEX_PATH):
+        return None
+    return sqlite3.connect(f"file:{INDEX_PATH}?mode=ro", uri=True, check_same_thread=False)
 
 
-def score(query_tokens, doc_counts, doc_len, df, num_docs):
-    s = 0.0
-    for t in query_tokens:
-        if t not in doc_counts:
+def rank(question, conn):
+    q_tokens = set(tokenize(question))
+    if not q_tokens:
+        return []
+
+    num_docs = conn.execute("SELECT COUNT(*) FROM docs").fetchone()[0]
+    if num_docs == 0:
+        return []
+
+    scores = {}
+    for t in q_tokens:
+        term_row = conn.execute("SELECT id FROM terms WHERE term = ?", (t,)).fetchone()
+        if term_row is None:
             continue
-        tf = doc_counts[t] / max(doc_len, 1)
-        idf = math.log((num_docs + 1) / (df.get(t, 0) + 1)) + 1
-        s += tf * idf
-    return s
+        term_id = term_row[0]
 
+        df_row = conn.execute("SELECT df FROM doc_freq WHERE term_id = ?", (term_id,)).fetchone()
+        if df_row is None:
+            continue
+        df = df_row[0]
+        if df / num_docs > MAX_DOC_FRACTION:
+            continue  # too common to be useful — skip scanning its postings
 
-def rank(question, index):
-    q_tokens = tokenize(question)
-    scores = []
-    for doc_key, counts in index["doc_freqs"].items():
-        s = score(q_tokens, counts, index["doc_lengths"][doc_key], index["df"], index["num_docs"])
-        scores.append((s, doc_key))
-    scores.sort(reverse=True)
-    return scores
+        idf = math.log((num_docs + 1) / (df + 1)) + 1
+        for doc_id, tf, length in conn.execute(
+            """SELECT p.doc_id, p.tf, d.length
+               FROM postings p JOIN docs d ON p.doc_id = d.id
+               WHERE p.term_id = ?""",
+            (term_id,),
+        ):
+            scores[doc_id] = scores.get(doc_id, 0.0) + (tf / max(length, 1)) * idf
+
+    ranked_ids = sorted(scores.items(), key=lambda x: x[1], reverse=True)[:50]
+    results = []
+    for doc_id, score in ranked_ids:
+        row = conn.execute("SELECT doc_key FROM docs WHERE id = ?", (doc_id,)).fetchone()
+        if row:
+            results.append((score, row[0]))
+    return results
 
 
 def build_context(top_docs):
@@ -100,12 +128,12 @@ def main():
         return
     question = " ".join(sys.argv[1:])
 
-    if not os.path.exists(INDEX_PATH):
+    conn = open_index()
+    if conn is None:
         print("No index found — run `python3 src/ingest.py` first.")
         return
 
-    index = load_index()
-    ranked = [(s, f) for s, f in rank(question, index) if s > 0][:TOP_K]
+    ranked = [(s, f) for s, f in rank(question, conn) if s > 0][:TOP_K]
 
     if not ranked:
         print("No relevant article matched that question.")

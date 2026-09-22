@@ -15,7 +15,7 @@ import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(__file__))
-import ask  # noqa: E402 — reuse rank(), build_context(), ask_ollama(), load_index()
+import ask  # noqa: E402 — reuse rank(), build_context(), ask_ollama(), open_index()
 
 BASE = os.path.join(os.path.dirname(__file__), "..")
 WEB_DIR = os.path.join(BASE, "web")
@@ -94,24 +94,27 @@ class Handler(BaseHTTPRequestHandler):
 
 
 class WikiZipServer(ThreadingHTTPServer):
-    """Loads the index once at startup and caches it in memory, instead of
-    re-reading (potentially a large) index.json off disk on every request."""
+    """Opens the SQLite index once and reuses that connection for every
+    request, instead of loading a (potentially huge) index fully into
+    memory. Reopens automatically if index.db is rebuilt (mtime changes)."""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self._index = None
+        self._conn = None
         self._index_mtime = None
 
     def get_index(self):
         if not os.path.exists(ask.INDEX_PATH):
             return None
         mtime = os.path.getmtime(ask.INDEX_PATH)
-        if self._index is None or mtime != self._index_mtime:
-            print("Loading index.json into memory...")
-            self._index = ask.load_index()
+        if self._conn is None or mtime != self._index_mtime:
+            print("Opening index.db...")
+            if self._conn is not None:
+                self._conn.close()
+            self._conn = ask.open_index()
             self._index_mtime = mtime
-            print("Index loaded.")
-        return self._index
+            print("Index ready.")
+        return self._conn
 
 
 def main():
