@@ -1,10 +1,12 @@
-"""Pull a large number of Wikipedia articles (short lead-paragraph abstracts,
-not full text) from Wikipedia's bulk abstracts dump — one big download and a
-streaming parse, instead of one API call per article. This is what makes
-hundreds of thousands of articles feasible overnight; fetch_history.py's
-one-request-per-article approach would take days at that scale.
+"""Pull a large number of Wikipedia articles from the real bulk export dumps
+(Wikipedia discontinued the old standalone "abstracts" dump — this now reads
+the pages-articles-multistream XML dumps instead: full wikitext, which gets
+stripped down to plain text here with lightweight regex cleanup, not a full
+wikitext parser). One continuous streaming download+parse, not one API call
+per article — that's what makes hundreds of thousands of articles feasible
+overnight.
 
-Uses only the Python standard library (urllib, gzip, xml.etree, zipfile).
+Uses only the Python standard library (urllib, bz2, xml.etree, zipfile, re).
 Must be run somewhere with real internet access — this will NOT work from a
 sandboxed/proxied environment that blocks dumps.wikimedia.org.
 
@@ -13,19 +15,26 @@ Usage:
     python3 src/fetch_bulk.py --target 2000000 --shard-size 1000
 
 Notes:
-    - Sampling is uniform-random across the whole dump (reservoir sampling),
-      not just the first N encountered — so you get broad topic coverage,
-      not an alphabetical slice.
-    - Abstracts are short (typically a sentence or two). At 200k-2M articles
-      this stays well under 1GB even before zip compression — if you want
-      denser per-article content instead of more articles, fetch_history.py
-      (full extracts, but far slower per-article) is the better tool.
+    - Articles are taken, in order, from the lower page-ID range of the
+      dump (the first several multistream part files) until the target
+      count is reached — not a random sample across all of Wikipedia.
+      That's a real scope trade-off: downloading and scanning ALL 27 part
+      files just to sample evenly would take far longer than "overnight."
+      The part files below cover roughly the first ~2 million page IDs,
+      comfortably more than enough to reach typical targets after
+      redirects/stubs are skipped.
+    - Wikitext-to-plaintext cleanup here is regex-based, not a full parser
+      (no external dependencies). It strips templates, refs, tables, links,
+      and formatting reasonably well, but won't be perfect on every article
+      — some residual markup may slip through occasionally.
+    - Each article's cleaned text is capped at ~3000 characters, which
+      keeps the whole run well under a "few GB" even at very large targets.
 """
 
 import argparse
-import gzip
+import bz2
 import os
-import random
+import re
 import sys
 import urllib.error
 import urllib.request
@@ -37,100 +46,157 @@ KNOWLEDGE_DIR = os.path.join(BASE, "knowledge")
 
 HEADERS = {"User-Agent": "tiny-rag/1.0 (personal offline knowledge base project)"}
 DUMP_BASE = "https://dumps.wikimedia.org/enwiki/latest/"
-COMBINED_NAME = "enwiki-latest-abstract.xml.gz"
-SPLIT_NAME_FMT = "enwiki-latest-abstract{}.xml.gz"
-MAX_SPLIT_FILES = 30
+
+# Lower page-ID range multistream part files, in order. Each covers a
+# contiguous block of page IDs. More than enough real articles live in
+# just the first few of these to reach typical targets.
+PART_FILES = [
+    "enwiki-latest-pages-articles-multistream1.xml-p1p41242.bz2",
+    "enwiki-latest-pages-articles-multistream2.xml-p41243p151573.bz2",
+    "enwiki-latest-pages-articles-multistream3.xml-p151574p311329.bz2",
+    "enwiki-latest-pages-articles-multistream4.xml-p311330p558391.bz2",
+    "enwiki-latest-pages-articles-multistream5.xml-p558392p958045.bz2",
+    "enwiki-latest-pages-articles-multistream6.xml-p958046p1483661.bz2",
+    "enwiki-latest-pages-articles-multistream7.xml-p1483662p2134111.bz2",
+]
+
+MAX_EXTRACT_CHARS = 3000
 
 
-def open_gz_stream(url):
+def localname(tag):
+    return tag.rsplit("}", 1)[-1] if "}" in tag else tag
+
+
+def strip_templates(text):
+    """Remove {{...}} templates, handling nesting (regex alone can't)."""
+    out = []
+    depth = 0
+    i, n = 0, len(text)
+    while i < n:
+        if text[i:i + 2] == "{{":
+            depth += 1
+            i += 2
+            continue
+        if text[i:i + 2] == "}}" and depth > 0:
+            depth -= 1
+            i += 2
+            continue
+        if depth == 0:
+            out.append(text[i])
+        i += 1
+    return "".join(out)
+
+
+_RE_COMMENT = re.compile(r"<!--.*?-->", re.DOTALL)
+_RE_REF = re.compile(r"<ref[^>]*/>|<ref[^>]*>.*?</ref>", re.DOTALL | re.IGNORECASE)
+_RE_TABLE = re.compile(r"\{\|.*?\|\}", re.DOTALL)
+_RE_FILELINK = re.compile(r"\[\[(File|Image):[^\]]*\]\]", re.IGNORECASE)
+_RE_PIPED_LINK = re.compile(r"\[\[[^\]|]*\|([^\]]*)\]\]")
+_RE_PLAIN_LINK = re.compile(r"\[\[([^\]]*)\]\]")
+_RE_EXTLINK = re.compile(r"\[https?://[^\s\]]*\s*([^\]]*)\]")
+_RE_BOLD_ITALIC = re.compile(r"'{2,5}")
+_RE_HEADER = re.compile(r"^=+\s*(.*?)\s*=+$", re.MULTILINE)
+_RE_HTML_TAG = re.compile(r"<[^>]+>")
+_RE_WS = re.compile(r"[ \t]+")
+_RE_BLANKLINES = re.compile(r"\n{3,}")
+
+
+def wikitext_to_plain(text):
+    if not text:
+        return ""
+    text = _RE_COMMENT.sub("", text)
+    text = _RE_REF.sub("", text)
+    text = _RE_TABLE.sub("", text)
+    text = strip_templates(text)
+    text = _RE_FILELINK.sub("", text)
+    text = _RE_PIPED_LINK.sub(r"\1", text)
+    text = _RE_PLAIN_LINK.sub(r"\1", text)
+    text = _RE_EXTLINK.sub(r"\1", text)
+    text = _RE_BOLD_ITALIC.sub("", text)
+    text = _RE_HEADER.sub(r"\1", text)
+    text = _RE_HTML_TAG.sub("", text)
+    text = _RE_WS.sub(" ", text)
+    text = _RE_BLANKLINES.sub("\n\n", text)
+    return text.strip()
+
+
+def open_bz2_stream(url):
     req = urllib.request.Request(url, headers=HEADERS)
     resp = urllib.request.urlopen(req, timeout=60)
-    return gzip.GzipFile(fileobj=resp)
+    return bz2.BZ2File(resp)
 
 
-def dump_urls():
-    """Yield the dump file URL(s) to read, trying the single combined file
-    first, then falling back to the numbered split files if that 404s."""
-    combined_url = DUMP_BASE + COMBINED_NAME
-    try:
-        req = urllib.request.Request(combined_url, method="HEAD", headers=HEADERS)
-        urllib.request.urlopen(req, timeout=30)
-        yield combined_url
-        return
-    except urllib.error.HTTPError:
-        pass
-
-    print("  (combined dump not found — using split files instead)")
-    found_any = False
-    for n in range(1, MAX_SPLIT_FILES + 1):
-        url = DUMP_BASE + SPLIT_NAME_FMT.format(n)
+def iter_articles():
+    """Stream (title, plain_text) pairs out of the multistream dump files,
+    in order, skipping redirects and disambiguation-style near-empty pages."""
+    for fname in PART_FILES:
+        url = DUMP_BASE + fname
+        print(f"  reading {fname}")
         try:
-            req = urllib.request.Request(url, method="HEAD", headers=HEADERS)
-            urllib.request.urlopen(req, timeout=30)
-            yield url
-            found_any = True
-        except urllib.error.HTTPError:
-            if found_any:
-                return  # ran past the last split file
+            stream = open_bz2_stream(url)
+        except urllib.error.HTTPError as e:
+            print(f"  ! could not open {fname}: {e} — skipping")
             continue
 
-
-def iter_docs():
-    """Stream (title, abstract) pairs out of the dump, across however many
-    files it's split into, without ever holding the whole thing in memory."""
-    for url in dump_urls():
-        print(f"  reading {url}")
-        stream = open_gz_stream(url)
-        # iterparse lets us process <doc> elements one at a time and discard
-        # them, instead of parsing the whole (multi-GB uncompressed) tree.
         for event, elem in ET.iterparse(stream, events=("end",)):
-            if elem.tag == "doc":
-                title_el = elem.find("title")
-                abstract_el = elem.find("abstract")
-                title = (title_el.text or "").strip() if title_el is not None else ""
-                abstract = (abstract_el.text or "").strip() if abstract_el is not None else ""
-                # dump titles are prefixed "Wikipedia: "
-                if title.startswith("Wikipedia: "):
-                    title = title[len("Wikipedia: "):]
-                if title and abstract:
-                    yield title, abstract
-                elem.clear()  # free memory — critical for a multi-GB stream
+            if localname(elem.tag) != "page":
+                continue
+
+            title = None
+            raw_text = None
+            ns = None
+            for child in elem.iter():
+                name = localname(child.tag)
+                if name == "title" and title is None:
+                    title = child.text
+                elif name == "ns" and ns is None:
+                    ns = child.text
+                elif name == "text" and raw_text is None:
+                    raw_text = child.text
+
+            elem.clear()  # free memory — critical for a multi-GB stream
+
+            if ns != "0" or not title or not raw_text:
+                continue  # only main-namespace articles with real content
+            if raw_text.lstrip().upper().startswith("#REDIRECT"):
+                continue
+
+            plain = wikitext_to_plain(raw_text)[:MAX_EXTRACT_CHARS]
+            if len(plain) < 200:
+                continue  # too short to be useful (stub/disambiguation-ish)
+
+            yield title, plain
 
 
 CHECKPOINT_EVERY = 50000  # articles scanned between safety saves
 
 
-def reservoir_sample(target, checkpoint_cb=None):
-    """Single-pass uniform random sample of `target` (title, abstract) pairs
-    from a stream of unknown length.
-
-    If the connection drops or anything else goes wrong mid-stream, this
-    returns whatever it has so far instead of raising — call sites should
-    still write that out as real, usable zips rather than losing the run."""
-    sample = []
-    i = -1
+def collect_articles(target, checkpoint_cb=None):
+    """Take articles in order until `target` is reached (or the source runs
+    out). Returns whatever was collected even if interrupted — nothing is
+    lost on a dropped connection or Ctrl+C."""
+    collected = []
+    scanned = 0
     try:
-        for i, item in enumerate(iter_docs()):
-            if i < target:
-                sample.append(item)
-            else:
-                j = random.randint(0, i)
-                if j < target:
-                    sample[j] = item
-            if (i + 1) % 5000 == 0:
-                print(f"  scanned {i + 1:,} articles, sample has {len(sample):,}…", end="\r")
-            if checkpoint_cb and (i + 1) % CHECKPOINT_EVERY == 0:
-                print(f"\n  checkpoint at {i + 1:,} scanned — saving progress to knowledge/...")
-                checkpoint_cb(sample)
+        for title, plain in iter_articles():
+            scanned += 1
+            collected.append((title, plain))
+            if scanned % 2000 == 0:
+                print(f"  collected {len(collected):,} articles "
+                      f"(scanned {scanned:,} candidates)…", end="\r")
+            if checkpoint_cb and len(collected) % CHECKPOINT_EVERY == 0:
+                print(f"\n  checkpoint at {len(collected):,} — saving progress to knowledge/...")
+                checkpoint_cb(collected)
+            if len(collected) >= target:
+                break
     except (urllib.error.URLError, ConnectionError, OSError) as e:
-        print(f"\n  ! connection interrupted after scanning {i + 1:,} articles: {e}")
-        print(f"  Saving the {len(sample):,} articles collected so far — nothing is lost.")
-        print("  Re-run this script later to start a fresh (larger/different) sample.")
+        print(f"\n  ! connection interrupted after collecting {len(collected):,} articles: {e}")
+        print("  Saving what was collected so far — nothing is lost.")
     except KeyboardInterrupt:
-        print(f"\n  Stopped by user after scanning {i + 1:,} articles.")
-        print(f"  Saving the {len(sample):,} articles collected so far.")
+        print(f"\n  Stopped by user after collecting {len(collected):,} articles.")
+        print("  Saving what was collected so far.")
     print()
-    return sample
+    return collected
 
 
 def safe_filename(title):
@@ -145,9 +211,9 @@ def write_shards(items, shard_size, shard_prefix="bulk"):
         shard_items = items[i:i + shard_size]
         zip_path = os.path.join(KNOWLEDGE_DIR, f"{shard_prefix}-{shard_num:04d}.zip")
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-            for title, abstract in shard_items:
+            for title, text in shard_items:
                 fname = safe_filename(title) + ".txt"
-                zf.writestr(fname, abstract)
+                zf.writestr(fname, text)
         if shard_num % 25 == 0 or i + shard_size >= len(items):
             print(f"  wrote {shard_num} shard(s) so far…", end="\r")
     print()
@@ -155,31 +221,29 @@ def write_shards(items, shard_size, shard_prefix="bulk"):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--target", type=int, default=250000, help="number of articles to sample")
+    ap.add_argument("--target", type=int, default=250000, help="number of articles to collect")
     ap.add_argument("--shard-size", type=int, default=1000, help="articles per zip")
     args = ap.parse_args()
 
-    random.seed()
-
-    print(f"Sampling {args.target:,} articles from Wikipedia's abstracts dump...")
+    print(f"Collecting {args.target:,} articles from Wikipedia's bulk export dump...")
     print("(this streams and discards as it goes — no multi-GB file is kept on disk)")
-    print(f"(progress is saved to knowledge/ every {CHECKPOINT_EVERY:,} articles scanned, "
+    print(f"(progress is saved to knowledge/ every {CHECKPOINT_EVERY:,} articles collected, "
           f"so a dropped connection loses nothing)")
 
-    def checkpoint(sample_so_far):
-        write_shards(sample_so_far, args.shard_size)
+    def checkpoint(collected_so_far):
+        write_shards(collected_so_far, args.shard_size)
 
-    sample = reservoir_sample(args.target, checkpoint_cb=checkpoint)
-    print(f"\nGot {len(sample):,} articles.\n")
+    collected = collect_articles(args.target, checkpoint_cb=checkpoint)
+    print(f"\nGot {len(collected):,} articles.\n")
 
     print("Writing final zip shards into knowledge/...")
-    write_shards(sample, args.shard_size)
+    write_shards(collected, args.shard_size)
 
-    total_bytes = sum(len(a.encode("utf-8")) for _, a in sample)
+    total_bytes = sum(len(t.encode("utf-8")) for _, t in collected)
     print(f"\nRaw text: ~{total_bytes / (1024*1024):.1f} MB before compression.")
-    if len(sample) < args.target:
-        print(f"(Got {len(sample):,} of the {args.target:,} requested — re-run to try for "
-              f"a fuller sample later.)")
+    if len(collected) < args.target:
+        print(f"(Got {len(collected):,} of the {args.target:,} requested — the configured "
+              f"part files ran out. Add more filenames to PART_FILES for a larger run.)")
     print("Done (or safely stopped). Run `python3 src/ingest.py` next to index the zips.")
 
 
