@@ -1,9 +1,8 @@
-#WikiZip (NOT TOTALLY USEABLE YET) may be inaccurate due to data holes
+#WikiZip ***may be inaccurate due to data holes***
 
 A tiny local question-answering setup that runs comfortably on 8GB of RAM.
 
-**The idea:**  reference material sits zipped, article by article. A small
-keyword index tells the system which article is relevant to a
+**The idea:**  reference material from Wikipedia sits zipped, article by article. A small keyword index tells the system which article is relevant to a
 question. nothing is unzipped permanently. When you ask something, only
 the matching article(s) get read into memory straight out of whichever
 zip holds them their text is handed to a small local language model as
@@ -16,7 +15,7 @@ the "knowledge" stays compressed on disk until it's actually needed.
  The LLM is a small model...Roughly 1GB on disk
 
 
-  The knowledge base** stays compressed. `ingest.py` reads every article
+  The knowledge base stays compressed. `ingest.py` reads every article
   inside every zip once, in memory, to build a lightweight per-article
   word-frequency index, then discards the extracted text. Nothing is left
   unzipped on disk. The index grows with the knowledge base — a few KB for
